@@ -1,8 +1,6 @@
 package com.myspring;
 
-import com.myspring.entity.Plane;
-import com.myspring.entity.ReportService;
-import com.myspring.service.FlyingService;
+import com.myspring.service.ReportService;
 
 
 public class Main {
