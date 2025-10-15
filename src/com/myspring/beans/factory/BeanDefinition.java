@@ -1,4 +1,4 @@
-package com.myspring.configuration;
+package com.myspring.beans.factory;
 
 /**
  * объект для описания бина
@@ -9,13 +9,18 @@ public class BeanDefinition {
     private final Class<?> type;//тип бина
     private Object instance;//для хранения бина
     private final boolean isPrototype;//маркер прототайп или синглетон
-
+    private final String qualifier;
 
     //в конструкторе бин на создаем(т.е. private Object instance;), чтобы не нарушать инверсию управления (IoC),
     // его заполнение будет позже через сеттер setInstance и оно зависит от области действия (singleton или prototype),
-    public BeanDefinition(Class<?> type, boolean isPrototype) {
+    public BeanDefinition(Class<?> type, boolean isPrototype, String qualifier) {
         this.type = type;
         this.isPrototype = isPrototype;
+        this.qualifier = qualifier;
+    }
+
+    public String getQualifier() {
+        return qualifier;
     }
 
     public Class<?> getType() {
