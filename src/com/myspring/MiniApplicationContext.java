@@ -1,130 +1,131 @@
 package com.myspring;
 
-import com.myspring.annotation.Autowired;
-import com.myspring.annotation.Component;
-import com.myspring.annotation.Scope;
+import com.myspring.annotation.*;
 import com.myspring.configuration.BeanDefinition;
 import com.myspring.configuration.InitializingBean;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
+/**
+ * класс описывающий логику работы по созданию бина
+ */
 public class MiniApplicationContext {
-    private final Map<Class<?>, Object> singletonBeans = new HashMap<>();//Хранит уже созданные singleton-экземпляры
-    private final Map<Class<?>, Class<?>> componentTypes = new HashMap<>(); //Хранит все классы, помеченные @Component, даже если они ещё не созданы
+    //контейнер бинов
+    private final Map<Class<?>, BeanDefinition> beanFactory = new HashMap<>();
 
-    private final Map<Class<?>, BeanDefinition> beanDefinition = new HashMap<>();
-
-
-    public MiniApplicationContext() {
+    public MiniApplicationContext(String location) {
         try {
-            instantiateComponents("com.myspring");
-            instantiateSingletons();
+            scanPackage(location);//сканирование рекурсивно
+            instantiateSingletons();//singleton-бины создаются сразу при запуске контекста
         } catch (Exception e) {
             throw new RuntimeException("Error initializing context", e);
         }
     }
 
-    
+    //сканирование папок и файлов рекурсивно
+    private void scanPackage(String basePackage) throws ClassNotFoundException, IOException, URISyntaxException {
+        ClassLoader classLoader = ClassLoader.getSystemClassLoader();//отвечает за загрузку классов
+        String path = basePackage.replace('.', '/');//т.к. директории отмечены точкой то нужно их поменять чтобы били как и файлы т.е. //преобразование com.myspring в com/myspring
+        Enumeration<URL> resources = classLoader.getResources(path);//получение путей в файловой системе по которым можно искать class-файлы
+        //URL resource = Thread.currentThread().getContextClassLoader().getResource(path);
+        if (resources == null) throw new RuntimeException("Пакет не найден: " + basePackage);
 
-    public <T> Object getBean(Class<T> type) {
-        try {
-            if (singletonBeans.containsKey(type)) {
-                return singletonBeans.get(type);
-            } else if (componentTypes.containsKey(type)) {
-                return componentTypes.get(type);
-            } else throw new RuntimeException("Bean " + type.getName() + " not found");
-        } catch (RuntimeException e) {
-            throw new RuntimeException("Bean " + type.getName() + " not found", e);
-        }
-    }
-
-
-    public void instantiateComponents(String basePackage) {
-        try {
-            ClassLoader classLoader = ClassLoader.getSystemClassLoader();
-            String path = basePackage.replace(".", "/");
-            Enumeration<URL> resources = classLoader.getResources(path);
-
-            while (resources.hasMoreElements()) {
-                URL url = resources.nextElement();
-                File root = new File(url.toURI());
-                scanDirectory(root, basePackage);
-            }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private void scanDirectory(File directory, String packageName) throws ClassNotFoundException, InstantiationException, IllegalAccessException {
-        for (File file : Objects.requireNonNull(directory.listFiles())) {
-            if (file.isDirectory()) {
-                scanDirectory(file, packageName + "." + file.getName()); // рекурсивно заходим в подпапку
-            } else if (file.getName().endsWith(".class")) {
-                String className = file.getName().replace(".class", "");
-                Class<?> clazz = Class.forName(packageName + "." + className);
-
-                if (clazz.isAnnotationPresent(Component.class)) {
-                    System.out.println("Component найден: " + clazz.getName());
-                    Object instance = null;
-                    try {
-                        instance = clazz.getDeclaredConstructor().newInstance();
-                    } catch (InvocationTargetException | NoSuchMethodException e) {
-                        throw new RuntimeException(e);
+        while (resources.hasMoreElements()) {//обходим по папкам
+            URL url = resources.nextElement();  //наподобие итератора
+            File files = new File(url.toURI());
+            // File directory = new File(resources.getFile());
+            for (File file : Objects.requireNonNull(files.listFiles())) {
+                if (file.isDirectory()) {
+                    scanPackage(basePackage + "." + file.getName()); // рекурсивно идём в подпапки
+                } else if (file.getName().endsWith(".class")) {
+                    String className = basePackage + "." + file.getName().replace(".class", "");//получение названия файла
+                    Class<?> clazz = Class.forName(className);//получение обьекта класса
+                    if (clazz.isAnnotationPresent(Component.class) || clazz.isAnnotationPresent(Service.class) || clazz.isAnnotationPresent(Repository.class)) {
+                        boolean isPrototype = clazz.isAnnotationPresent(Scope.class)
+                                && "prototype".equals(clazz.getAnnotation(Scope.class).value());//определяем, является ли класс прототипом, то есть должен ли контейнер создавать новый экземпляр каждый раз, когда вызывается getBean
+                        beanFactory.put(clazz, new BeanDefinition(clazz, isPrototype));//если false то бин создаётся один раз и сохраняется; если true то бин создаётся каждый раз заново.
                     }
-                    singletonBeans.put(clazz, instance);
                 }
             }
         }
     }
 
+    public <T> T getBean(Class<T> clazz) {
+        try {
+            for (BeanDefinition beanDefinition : beanFactory.values()) {
+                if (clazz.isAssignableFrom(beanDefinition.getType())) {//проверка совместимости типов -> Можно ли использовать бин beanDefinition.getType() как реализацию типа clazz
+                    // Если экземпляр уже создан, вернуть его
+                    if (!beanDefinition.isPrototype() && beanDefinition.getInstance() != null) {
+                        return clazz.cast(beanDefinition.getInstance());
+                    }
+                    // Если нет — создать, сохранить и вернуть
+                    T instance = clazz.cast(createBean(beanDefinition.getType()));
+                    if (!beanDefinition.isPrototype()) {
+                        beanDefinition.setInstance(instance);
+                    }
+                    return instance;
+                }
+            }
+            throw new RuntimeException("Бин не найден: " + clazz.getName());
+        } catch (Exception e) {
+            throw new RuntimeException("Ошибка получения бина: " + clazz, e);
+        }
+    }
+
+
     private void instantiateSingletons() throws Exception {
-        for(Class<?> clazz : singletonBeans.keySet()){
-            if(!isPrototype(clazz)){
-                createBean(clazz);
+        for (BeanDefinition bd : beanFactory.values()) {//Перебираем все зарегистрированные BeanDefinition в beanFactory
+            if (bd.getInstance() == null && !bd.isPrototype()) {//если бин ещё не создан
+                Object instance = createBean(bd.getType());//создать экземпляр бина
+                bd.setInstance(instance);//сохранение бина
             }
         }
     }
 
+    //Прототипы не создаются заранее — они создаются каждый раз при getBean()
     private boolean isPrototype(Class<?> clazz) {
         Scope scope = clazz.getDeclaredAnnotation(Scope.class);
         return scope != null && "proto".equalsIgnoreCase(scope.value());
     }
 
-    private void createBean(Class<?> clazz) throws Exception {
-        if (singletonBeans.containsKey(clazz)) {
-            singletonBeans.get(clazz);
-            return;
-        }
-        Object instance = clazz.getDeclaredConstructor().newInstance();
+    private Object createBean(Class<?> clazz) throws Exception {
+        BeanDefinition entity = beanFactory.get(clazz);
 
-        for (Field field : clazz.getDeclaredFields()) {
-            if (field.isAnnotationPresent(Autowired.class)) {
-                Class<?> dependencyType = field.getType();
-                Object dependency = getBean(dependencyType);
-                field.setAccessible(true);
-                field.set(instance, dependency);
+        if (entity == null) {
+            throw new RuntimeException("Bean " + clazz.getName() + " not found");
+        }
+        Object instance = clazz.getDeclaredConstructor().newInstance();//получаем безаргументный конструктор класса, создаём новый объект через рефлексию
+
+        for (Field field : clazz.getDeclaredFields()) {//перебираем все поля класса
+            if (field.isAnnotationPresent(Autowired.class)) { //если поле помечено @Autowired
+                Object dependency = getBean(field.getType()); //вызываем getBean() — это рекурсивно создаёт или возвращает нужный бин
+                field.setAccessible(true); //делаем поле доступным, даже если оно приватное
+                field.set(instance, dependency);//вставляем зависимость в поле
             }
         }
 
-        if(instance instanceof InitializingBean){
+        if (instance instanceof InitializingBean) {//Если класс реализует интерфейс InitializingBean, вызывается метод afterPropertiesSet()
             ((InitializingBean) instance).afterPropertiesSet();
         }
-        if(!isPrototype(clazz)){
-            singletonBeans.put(clazz, instance);
+
+        if (!entity.isPrototype()) {
+            entity.setInstance(instance); //Если бин не помечен как @Scope("prototype"), сохраняем его как бин
         }
+        return instance;
     }
 
     public void printBeans() {
         System.out.println("\nBeanFactory container:");
-        singletonBeans.forEach((clazz, instance) -> {
-            System.out.println(clazz.getName() + " : " + instance);
+        beanFactory.forEach((clazz, instance) -> {
+            System.out.println(clazz.getName() + " : " + instance.getInstance());
         });
     }
 }
